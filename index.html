@@ -199,6 +199,13 @@
     #nameView.show { display: flex; }
     #nameView .nvSub { font-size: 24px; color: #aaa; }
     #nameView .nvName { font-size: 52px; font-weight: 800; line-height: 1.2; word-break: break-word; }
+    #displayStatus {
+      position: absolute;
+      left: 10px; right: 10px; bottom: 8px;
+      text-align: center;
+      font-size: 12px;
+      color: #5a5a5a;
+    }
 
     /* ⑤ 자동 송신 화면 (#remote 스타일 상당수 재사용) */
     #autosend {
@@ -272,6 +279,7 @@
 
     /* ── 디버그 패널 ── */
     #debugToggle {
+      display: none;            /* ③④ 모드 제거로 미사용 — 숨김 */
       position: fixed;
       top: 6px;
       right: 6px;
@@ -327,11 +335,9 @@
     <!-- 대기 화면 -->
     <div id="waiting">
       <div class="title">메타 디스플레이 테스트</div>
-      <button id="btnDisplay" class="bigBtn focusable">① 글래스 디스플레이 모드</button>
-      <button id="btnRemote" class="bigBtn focusable">② 폰 리모컨 모드</button>
-      <button id="btnDocent" class="bigBtn focusable">③ 단독 도슨트 테스트</button>
-      <button id="btnScanner" class="bigBtn focusable">④ 주변 BLE 스캔</button>
-      <button id="btnAutoSend" class="bigBtn focusable">⑤ 폰 BLE 자동 송신 (최강 신호)</button>
+      <button id="btnDisplay" class="bigBtn focusable">① 글래스 디스플레이 (수신)</button>
+      <button id="btnAutoSend" class="bigBtn focusable">② 폰 BLE 자동 송신 (최강 신호)</button>
+      <button id="btnRemote" class="bigBtn focusable">③ 폰 수동 리모컨</button>
       <div id="waitingMsg">모드를 선택하세요</div>
     </div>
 
@@ -348,6 +354,8 @@
         <div class="nvSub">가장 강한 신호</div>
         <div class="nvName"></div>
       </div>
+      <!-- 연결/수신 상태 (디버깅용) -->
+      <div id="displayStatus"></div>
     </div>
 
     <!-- 폰 리모컨 모드 (송신) -->
@@ -434,8 +442,6 @@
        ───────────────────────────────────────────── */
     const waitingEl   = document.getElementById('waiting');
     const waitingMsg  = document.getElementById('waitingMsg');
-    const btnDocent   = document.getElementById('btnDocent');
-    const btnScanner  = document.getElementById('btnScanner');
     const docentEl    = document.getElementById('docent');
     const scrollerEl  = document.getElementById('scroller');
     const viewportEl  = document.getElementById('viewport');
@@ -472,6 +478,8 @@
     const acValEl     = document.querySelector('#autoCurrent .acVal');
     const nameViewEl  = document.getElementById('nameView');
     const nvNameEl    = document.querySelector('#nameView .nvName');
+    const nvSubEl     = document.querySelector('#nameView .nvSub');
+    const displayStatusEl = document.getElementById('displayStatus');
 
     // 폰↔글래스 공유 채널 (ntfy.sh). ?ch= 로 덮어쓰기 가능
     const CHANNEL = new URLSearchParams(location.search).get('ch') || 'metadisplay-limjy-7f3a2k';
@@ -854,8 +862,9 @@
     /* ─────────────────────────────────────────────
        8-A. 글래스 디스플레이 모드 (ntfy 구독, 수신 전용)
        ───────────────────────────────────────────── */
-    let ws = null;
-    let wsReconnect = null;
+    // 글래스 WebView 호환을 위해 WebSocket 대신 HTTP 폴링(fetch) 사용
+    let pollTimer = null;
+    let pollTs = 0;            // 이 시각(unix초) 이후 메시지만 가져옴
 
     function startDisplay() {
       waitingEl.style.display = 'none';
@@ -869,42 +878,47 @@
       if ('speechSynthesis' in window) window.speechSynthesis.getVoices();
       btnConnect.style.display = 'none';
       displayMsg.textContent = '채널 연결 중…';
-      openWS();
+      pollTs = Math.floor(Date.now() / 1000) - 600;  // 최근 10분 상태부터 받기
+      if (pollTimer) clearInterval(pollTimer);
+      pollOnce();
+      pollTimer = setInterval(pollOnce, 1500);
     }
 
-    function openWS() {
+    async function pollOnce() {
       try {
-        ws = new WebSocket('wss://ntfy.sh/' + encodeURIComponent(CHANNEL) + '/ws?since=10m');
-      } catch (e) { scheduleReconnect(); return; }
-
-      ws.addEventListener('open', () => {
-        displayMsg.textContent = '연결됨 — 신호 대기 중…';
-      });
-      ws.addEventListener('message', (ev) => {
-        let data;
-        try { data = JSON.parse(ev.data); } catch (e) { return; }
-        if (data.event !== 'message') return;           // open/keepalive 무시
-        const msg = (data.message || '').trim();
-        if (!msg) return;
-        if (msg === 'off') { displayIdle(); return; }
-        if (beaconById[msg]) {
-          // 비콘 id(01~08) → 도슨트 스크립트
-          displayConnect.style.display = 'none';
-          nameViewEl.classList.remove('show');
-          docentEl.style.display = 'block';
-          enterBeacon(msg);
-        } else {
-          // 임의 기기 이름 → 크게 표시
-          showName(msg);
+        const url = 'https://ntfy.sh/' + encodeURIComponent(CHANNEL) + '/json?poll=1&since=' + pollTs;
+        const res = await fetch(url, { cache: 'no-store' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const text = await res.text();
+        const lines = text.split('\n').map(s => s.trim()).filter(Boolean);
+        let latest = null;
+        for (const line of lines) {
+          let d;
+          try { d = JSON.parse(line); } catch (e) { continue; }
+          if (d.event !== 'message') continue;       // open/keepalive 무시
+          latest = d;
+          if (typeof d.time === 'number') pollTs = Math.max(pollTs, d.time + 1);
         }
-      });
-      ws.addEventListener('close', scheduleReconnect);
-      ws.addEventListener('error', () => { try { ws.close(); } catch (e) {} });
+        if (latest) applyMessage((latest.message || '').trim());
+        else setDisplayStatus('연결됨 · 신호 대기');
+      } catch (e) {
+        setDisplayStatus('재연결 중… (' + e.message + ')');
+      }
     }
 
-    function scheduleReconnect() {
-      if (wsReconnect) return;
-      wsReconnect = setTimeout(() => { wsReconnect = null; openWS(); }, 2000);
+    function applyMessage(msg) {
+      if (!msg) return;
+      if (msg === 'off') { displayIdle(); return; }
+      if (beaconById[msg]) {
+        // 비콘 id(01~08) → 도슨트 스크립트
+        displayConnect.style.display = 'none';
+        nameViewEl.classList.remove('show');
+        docentEl.style.display = 'block';
+        enterBeacon(msg);
+        setDisplayStatus('수신: ' + msg + '번 비콘');
+      } else {
+        showName(msg);   // 임의 기기 이름(+dBm)
+      }
     }
 
     // "대기(지우기)" 수신 시 화면 비우고 대기 표시
@@ -916,16 +930,24 @@
       nameViewEl.classList.remove('show');
       displayConnect.style.display = 'flex';
       displayMsg.textContent = '연결됨 — 신호 대기 중…';
+      setDisplayStatus('연결됨 · 대기');
     }
 
-    // ⑤에서 보낸 임의 기기 이름을 크게 표시
-    function showName(name) {
+    // ⑤에서 보낸 "이름\n-52 dBm" 형식을 크게 표시 (이름=큰글씨, dBm=부제)
+    function showName(raw) {
       cancelAnimationFrame(rafId);
       currentBeaconId = null;
       displayConnect.style.display = 'none';
       docentEl.style.display = 'none';
-      nvNameEl.textContent = name;
+      const parts = raw.split('\n');
+      nvNameEl.textContent = parts[0];
+      nvSubEl.textContent = parts[1] ? parts[1] : '가장 강한 신호';
       nameViewEl.classList.add('show');
+      setDisplayStatus('수신: ' + parts[0]);
+    }
+
+    function setDisplayStatus(text) {
+      if (displayStatusEl) displayStatusEl.textContent = '채널 ' + CHANNEL + ' · ' + text;
     }
 
     /* ─────────────────────────────────────────────
@@ -969,7 +991,9 @@
        8-C. 모드 ⑤ 폰 BLE 자동 송신 (최강 신호 기기 → 글래스)
        ───────────────────────────────────────────── */
     let autoSendTimer = null;
-    let autoLastSent = null;      // 직전에 보낸 라벨 (중복 전송 방지)
+    let autoLastSent = null;      // 직전에 보낸 라벨 (기기 식별용)
+    let autoLastSentAt = 0;       // 직전 전송 시각 (dBm 주기 갱신용)
+    const AUTO_REFRESH_MS = 2000; // 같은 기기라도 이 주기로 dBm 갱신 전송
 
     function deviceLabel(d) {
       return d.name || (d.manuf ? d.manuf + ' 기기' : '');
@@ -979,6 +1003,7 @@
       waitingEl.style.display = 'none';
       autosendEl.style.display = 'flex';
       autoLastSent = null;
+      autoLastSentAt = 0;
 
       if (!bleSupported()) {
         autoListEl.innerHTML = '<div class="empty">이 기기는 BLE 스캔을 지원하지 않습니다.<br>폰(안드로이드 크롬)에서 블루투스를 켜고 chrome://flags의 Experimental Web Platform features를 활성화하세요.</div>';
@@ -1009,10 +1034,14 @@
         acNameEl.textContent = label;
         acFillEl.style.width = rssiToProximity(best.rssi) + '%';
         acValEl.textContent = best.rssi + 'dBm';
-        // 라벨이 바뀌었을 때만 전송 (스팸 방지)
-        if (label && label !== autoLastSent) {
+        // 기기가 바뀌면 즉시, 같은 기기면 AUTO_REFRESH_MS 마다 dBm 갱신 전송
+        const changed = label && label !== autoLastSent;
+        if (label && (changed || now - autoLastSentAt > AUTO_REFRESH_MS)) {
           autoLastSent = label;
-          fetch('https://ntfy.sh/' + encodeURIComponent(CHANNEL), { method: 'POST', body: label })
+          autoLastSentAt = now;
+          // "이름\n-52 dBm" 형식: 디스플레이가 이름=큰글씨, dBm=부제로 표시
+          const body = label + '\n' + best.rssi + ' dBm';
+          fetch('https://ntfy.sh/' + encodeURIComponent(CHANNEL), { method: 'POST', body })
             .catch(() => {});
         }
       } else {
@@ -1074,8 +1103,6 @@
     btnRemote.addEventListener('click', startRemote);
     remoteBack.addEventListener('click', remoteToWaiting);
     btnClear.addEventListener('click', () => sendBeacon('off', null));
-    btnDocent.addEventListener('click', startDocent);
-    btnScanner.addEventListener('click', startScanner);
     scanBackBtn.addEventListener('click', backToWaiting);
     showAllChk.addEventListener('change', renderScan);
     btnAutoSend.addEventListener('click', startAutoSend);
