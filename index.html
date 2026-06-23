@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>메타 레이밴 디스플레이 도슨트 테스트</title>
+  <style>
+    :root {
+      /* 글래스 디스플레이를 600x600 정사각형으로 가정 */
+      --safe: 45px;          /* 가장자리 안전영역 */
+      --header-size: 40px;   /* 헤더 폰트 크기 */
+      --body-size: 30px;     /* 본문 폰트 크기 */
+      --scroll-duration: 60s; /* 한 번 흐르는 데 걸리는 시간 (콘텐츠 길이에 맞춰 JS에서 조정) */
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      background: #000000;
+      color: #ffffff;
+      font-family: -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+      overflow: hidden;
+    }
+
+    /* 600x600 비율의 정사각형 스테이지 */
+    #stage {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: min(100vw, 100vh);
+      height: min(100vw, 100vh);
+      max-width: 600px;
+      max-height: 600px;
+      background: #000000;
+      overflow: hidden;
+    }
+
+    /* ── 대기 화면 ── */
+    #waiting {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      gap: 24px;
+      padding: var(--safe);
+      text-align: center;
+    }
+    #startBtn {
+      font-size: 32px;
+      font-weight: 700;
+      color: #ffffff;
+      background: #1a1a1a;
+      border: 2px solid #ffffff;
+      border-radius: 16px;
+      padding: 28px 40px;
+      cursor: pointer;
+    }
+    #startBtn:active { background: #333333; }
+    #waitingMsg { font-size: 22px; color: #aaaaaa; }
+
+    /* ── 도슨트 화면 ── */
+    #docent {
+      position: absolute;
+      inset: 0;
+      display: none;          /* 스캔 시작 후 표시 */
+      overflow: hidden;
+    }
+    /* 안전영역을 제외한 표시 영역 */
+    #viewport {
+      position: absolute;
+      inset: var(--safe);
+      overflow: hidden;
+    }
+    /* 위로 흐르는 콘텐츠 래퍼 */
+    #scroller {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      will-change: transform;
+    }
+    .header-text {
+      font-size: var(--header-size);
+      font-weight: 800;
+      line-height: 1.3;
+      margin-bottom: 0.8em;
+      word-break: keep-all;
+    }
+    .body-text {
+      font-size: var(--body-size);
+      font-weight: 400;
+      line-height: 1.5;
+      word-break: keep-all;
+    }
+
+    /* ── 디버그 패널 ── */
+    #debugToggle {
+      position: fixed;
+      top: 6px;
+      right: 6px;
+      z-index: 10;
+      font-size: 12px;
+      color: #888;
+      background: rgba(0,0,0,0.6);
+      border: 1px solid #444;
+      border-radius: 6px;
+      padding: 4px 8px;
+      cursor: pointer;
+    }
+    #debugPanel {
+      position: fixed;
+      top: 36px;
+      right: 6px;
+      z-index: 10;
+      width: 200px;
+      max-height: 60vh;
+      overflow-y: auto;
+      display: none;
+      font-size: 12px;
+      line-height: 1.5;
+      color: #b6ffb6;
+      background: rgba(0,0,0,0.8);
+      border: 1px solid #2a2a2a;
+      border-radius: 8px;
+      padding: 8px;
+    }
+    #debugPanel.show { display: block; }
+    #debugPanel h4 { font-size: 12px; color: #fff; margin-bottom: 4px; }
+    #debugPanel .row { display: flex; justify-content: space-between; }
+    #debugPanel .row.current { color: #ffd24d; font-weight: 700; }
+    #debugPanel .opts { margin-top: 8px; border-top: 1px solid #2a2a2a; padding-top: 6px; color: #ccc; }
+    #debugPanel label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+    #debugPanel .hint { color: #777; margin-top: 6px; }
+  </style>
+</head>
+<body>
+  <div id="stage">
+    <!-- 대기 화면 -->
+    <div id="waiting">
+      <button id="startBtn">BLE 스캔 시작</button>
+      <div id="waitingMsg">버튼을 눌러 도슨트를 시작하세요</div>
+    </div>
+
+    <!-- 도슨트 화면 -->
+    <div id="docent">
+      <div id="viewport">
+        <div id="scroller"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 디버그 -->
+  <button id="debugToggle">디버그 ▾</button>
+  <div id="debugPanel">
+    <h4>감지된 디바이스</h4>
+    <div id="deviceList">—</div>
+    <div class="opts">
+      <label><input type="checkbox" id="ttsToggle" checked /> TTS 켜기</label>
+      <div class="hint">키보드 1~8: 비콘 진입 시뮬레이션</div>
+      <div class="hint" id="bleStatus">BLE: 대기 중</div>
+    </div>
+  </div>
+
+  <script>
+    'use strict';
+
+    /* ─────────────────────────────────────────────
+       1. 데이터: 비콘 01~08 자동 생성
+       ───────────────────────────────────────────── */
+    const beacons = Array.from({ length: 8 }, (_, i) => {
+      const id = String(i + 1).padStart(2, '0');
+      return {
+        id,
+        title: `${id}번 BLE에 왔습니다`,
+        bodyLine: `${id}테스트용 스크립트`,
+      };
+    });
+    const beaconById = Object.fromEntries(beacons.map(b => [b.id, b]));
+
+    const BODY_REPEAT = 50; // 본문 줄 반복 횟수 (충분히 긴 스크롤 콘텐츠)
+
+    /* ─────────────────────────────────────────────
+       2. DOM 참조
+       ───────────────────────────────────────────── */
+    const waitingEl   = document.getElementById('waiting');
+    const waitingMsg  = document.getElementById('waitingMsg');
+    const startBtn    = document.getElementById('startBtn');
+    const docentEl    = document.getElementById('docent');
+    const scrollerEl  = document.getElementById('scroller');
+    const viewportEl  = document.getElementById('viewport');
+    const debugToggle = document.getElementById('debugToggle');
+    const debugPanel  = document.getElementById('debugPanel');
+    const deviceListEl= document.getElementById('deviceList');
+    const ttsToggle   = document.getElementById('ttsToggle');
+    const bleStatus   = document.getElementById('bleStatus');
+
+    /* ─────────────────────────────────────────────
+       3. 상태
+       ───────────────────────────────────────────── */
+    let currentBeaconId = null;   // 현재 화면에 표시 중인 비콘
+    let scanning = false;
+    let scanInstance = null;      // requestLEScan() 핸들
+    let rafId = null;             // 스크롤 애니메이션
+    const SCROLL_SPEED = 40;      // px/초 (텔레프롬프터 속도)
+
+    // RSSI 집계: { "01": { rssi, lastSeen }, ... }
+    const seen = {};
+    const STALE_MS = 4000;        // 이 시간 이상 안 보이면 후보에서 제외
+    const CONFIRM_MS = 2500;      // 최강 신호가 이만큼 유지돼야 "현재 위치" 확정
+
+    let candidateId = null;       // 현재 최강 후보
+    let candidateSince = 0;       // 후보가 된 시각
+
+    /* ─────────────────────────────────────────────
+       4. 콘텐츠 렌더링 + 스크롤
+       ───────────────────────────────────────────── */
+    function buildContent(beacon) {
+      scrollerEl.innerHTML = '';
+
+      const header = document.createElement('div');
+      header.className = 'header-text';
+      header.textContent = beacon.title;
+      scrollerEl.appendChild(header);
+
+      // bodyLine을 여러 번 반복해 긴 스크롤 콘텐츠 생성
+      const body = document.createElement('div');
+      body.className = 'body-text';
+      const lines = [];
+      for (let i = 0; i < BODY_REPEAT; i++) lines.push(beacon.bodyLine);
+      body.innerHTML = lines.join('<br>');
+      scrollerEl.appendChild(body);
+    }
+
+    function startScroll() {
+      cancelAnimationFrame(rafId);
+      // 시작 위치: 첫 줄이 표시영역 위쪽에 오도록 0에서 시작
+      let y = 0;
+      let last = performance.now();
+      const viewportH = viewportEl.clientHeight;
+
+      function frame(now) {
+        const dt = (now - last) / 1000;
+        last = now;
+        y += SCROLL_SPEED * dt;
+        scrollerEl.style.transform = `translateY(${-y}px)`;
+
+        const contentH = scrollerEl.scrollHeight;
+        // 콘텐츠가 완전히 위로 빠져나가면 처음부터 다시
+        if (y > contentH + viewportH) {
+          y = -viewportH * 0; // 곧바로 처음부터 (위에서 다시 등장)
+          y = 0;
+        }
+        rafId = requestAnimationFrame(frame);
+      }
+      rafId = requestAnimationFrame(frame);
+    }
+
+    /* ─────────────────────────────────────────────
+       5. TTS / 비프음
+       ───────────────────────────────────────────── */
+    let audioCtx = null;
+    function beep() {
+      try {
+        audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = 'sine';
+        osc.frequency.value = 880;
+        gain.gain.value = 0.2;
+        osc.connect(gain).connect(audioCtx.destination);
+        osc.start();
+        osc.stop(audioCtx.currentTime + 0.18);
+      } catch (e) { /* 무음 환경 무시 */ }
+    }
+
+    function speak(beacon) {
+      if (!('speechSynthesis' in window)) { beep(); return; }
+      window.speechSynthesis.cancel();
+      // 헤더 + 본문 몇 줄 정도를 읽음 (전체 50회는 과하므로 압축)
+      const text = `${beacon.title}. ${beacon.bodyLine}. ${beacon.bodyLine}. ${beacon.bodyLine}.`;
+      const u = new SpeechSynthesisUtterance(text);
+      u.lang = 'ko-KR';
+      u.rate = 1.0;
+      const koVoice = window.speechSynthesis.getVoices().find(v => v.lang && v.lang.startsWith('ko'));
+      if (koVoice) u.voice = koVoice;
+      window.speechSynthesis.speak(u);
+    }
+
+    /* ─────────────────────────────────────────────
+       6. 현재 위치 전환
+       ───────────────────────────────────────────── */
+    function enterBeacon(id) {
+      if (id === currentBeaconId) return;
+      const beacon = beaconById[id];
+      if (!beacon) return;
+
+      currentBeaconId = id;
+      buildContent(beacon);
+      startScroll();          // 스크롤 처음부터 다시 시작
+
+      if (ttsToggle.checked) {
+        speak(beacon);
+      } else {
+        beep();
+      }
+      updateDebug();
+    }
+
+    /* ─────────────────────────────────────────────
+       7. BLE 스캔 (requestLEScan)
+       ───────────────────────────────────────────── */
+    async function startScan() {
+      waitingMsg.textContent = '스캔 중...';
+      startBtn.style.display = 'none';
+      // 도슨트 화면으로 전환 (대기 텍스트는 비콘 잡히면 가려짐)
+      docentEl.style.display = 'block';
+      scanning = true;
+
+      // 사용자 제스처 안에서 오디오 컨텍스트/보이스 워밍업
+      try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
+      if ('speechSynthesis' in window) window.speechSynthesis.getVoices();
+
+      if (!navigator.bluetooth || !navigator.bluetooth.requestLEScan) {
+        bleStatus.textContent = 'BLE: requestLEScan 미지원 (디버그 모드 사용)';
+        waitingMsg.textContent = 'BLE 미지원 — 키보드 1~8로 테스트';
+        return;
+      }
+
+      try {
+        scanInstance = await navigator.bluetooth.requestLEScan({
+          acceptAllAdvertisements: true,
+        });
+        bleStatus.textContent = 'BLE: 스캔 중';
+
+        navigator.bluetooth.addEventListener('advertisementreceived', onAdvertisement);
+        // 주기적으로 후보 평가
+        setInterval(evaluateCandidates, 500);
+      } catch (e) {
+        bleStatus.textContent = 'BLE 오류: ' + e.message;
+        waitingMsg.textContent = 'BLE 스캔 실패 — 키보드 1~8로 테스트';
+      }
+    }
+
+    function onAdvertisement(event) {
+      const name = event.device && event.device.name;
+      if (!name) return;
+      const id = name.trim();
+      if (!beaconById[id]) return;     // 01~08 만 관심
+      seen[id] = { rssi: event.rssi, lastSeen: performance.now() };
+      updateDebug();
+    }
+
+    function evaluateCandidates() {
+      const now = performance.now();
+      // 오래된 항목 제거
+      for (const id of Object.keys(seen)) {
+        if (now - seen[id].lastSeen > STALE_MS) delete seen[id];
+      }
+      // 최강 신호 후보 선택
+      let best = null;
+      for (const id of Object.keys(seen)) {
+        if (!best || seen[id].rssi > seen[best].rssi) best = id;
+      }
+      if (!best) return;
+
+      if (best !== candidateId) {
+        candidateId = best;
+        candidateSince = now;
+      } else if (now - candidateSince >= CONFIRM_MS) {
+        // 일정 시간 동일 후보가 최강이면 확정
+        enterBeacon(best);
+      }
+      updateDebug();
+    }
+
+    /* ─────────────────────────────────────────────
+       8. 디버그 패널
+       ───────────────────────────────────────────── */
+    function updateDebug() {
+      const ids = Object.keys(seen).sort();
+      if (ids.length === 0) {
+        deviceListEl.innerHTML = '<div class="row">— 감지된 디바이스 없음 —</div>';
+      } else {
+        deviceListEl.innerHTML = ids.map(id => {
+          const cls = id === currentBeaconId ? 'row current' : 'row';
+          return `<div class="${cls}"><span>${id}</span><span>${seen[id].rssi} dBm</span></div>`;
+        }).join('');
+      }
+    }
+
+    debugToggle.addEventListener('click', () => {
+      debugPanel.classList.toggle('show');
+    });
+
+    /* ─────────────────────────────────────────────
+       9. 테스트 모드: 키보드 1~8
+       ───────────────────────────────────────────── */
+    window.addEventListener('keydown', (e) => {
+      if (e.key >= '1' && e.key <= '8') {
+        const id = String(Number(e.key)).padStart(2, '0');
+        // 시뮬레이션: seen 갱신 + 즉시 진입
+        seen[id] = { rssi: -40, lastSeen: performance.now() };
+        // 도슨트 화면이 아직 숨겨져 있으면 표시
+        docentEl.style.display = 'block';
+        enterBeacon(id);
+      }
+    });
+
+    /* ─────────────────────────────────────────────
+       10. 시작
+       ───────────────────────────────────────────── */
+    startBtn.addEventListener('click', startScan);
+  </script>
+</body>
+</html>
