@@ -103,6 +103,88 @@
     .scanItem .val { width: 56px; text-align: right; font-size: 14px; color: #9a9a9a; flex: none; }
     #scanList .empty { color: #777; font-size: 16px; padding-top: 16px; text-align: center; }
 
+    /* ── 글래스 디스플레이 모드 ── */
+    #display {
+      position: absolute;
+      inset: 0;
+      display: none;
+    }
+    #displayConnect {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 18px;
+      padding: var(--safe);
+      text-align: center;
+    }
+    .chanInfo { font-size: 14px; color: #888; }
+    .chanInfo .chan { color: #bbb; }
+    #displayMsg { font-size: 20px; color: #aaa; }
+
+    /* ── 폰 리모컨 모드 ── */
+    #remote {
+      position: absolute;
+      inset: 0;
+      display: none;
+      flex-direction: column;
+      padding: 24px;
+      color: #fff;
+    }
+    #remote .remoteHeader {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 20px;
+      font-weight: 800;
+      margin-bottom: 12px;
+    }
+    #remoteBack {
+      font-size: 14px;
+      color: #fff;
+      background: #1a1a1a;
+      border: 1px solid #666;
+      border-radius: 8px;
+      padding: 6px 10px;
+      cursor: pointer;
+    }
+    #remoteGrid {
+      flex: 1;
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      grid-auto-rows: 1fr;
+      gap: 10px;
+    }
+    .remoteBtn {
+      font-size: 28px;
+      font-weight: 800;
+      color: #fff;
+      background: #1a1a1a;
+      border: 2px solid #666;
+      border-radius: 14px;
+      cursor: pointer;
+    }
+    .remoteBtn:active { background: #333; }
+    .remoteBtn.sent { border-color: #ffd24d; color: #ffd24d; background: #2a2410; }
+    #remoteStatus { text-align: center; font-size: 16px; color: #9a9a9a; margin: 10px 0; }
+    #btnClear {
+      font-size: 16px;
+      color: #ccc;
+      background: #151515;
+      border: 1px solid #444;
+      border-radius: 10px;
+      padding: 12px;
+      cursor: pointer;
+    }
+
+    /* D-pad 포커스 표시 (글래스) */
+    .focusable:focus {
+      outline: 3px solid #ffd24d;
+      outline-offset: 2px;
+    }
+
     /* ── 도슨트 화면 ── */
     #docent {
       position: absolute;
@@ -195,9 +277,32 @@
     <!-- 대기 화면 -->
     <div id="waiting">
       <div class="title">메타 디스플레이 테스트</div>
-      <button id="btnDocent" class="bigBtn">① 도슨트 스크립트 테스트</button>
-      <button id="btnScanner" class="bigBtn">② 주변 BLE 스캔</button>
+      <button id="btnDisplay" class="bigBtn focusable">① 글래스 디스플레이 모드</button>
+      <button id="btnRemote" class="bigBtn focusable">② 폰 리모컨 모드</button>
+      <button id="btnDocent" class="bigBtn focusable">③ 단독 도슨트 테스트</button>
+      <button id="btnScanner" class="bigBtn focusable">④ 주변 BLE 스캔</button>
       <div id="waitingMsg">모드를 선택하세요</div>
+    </div>
+
+    <!-- 글래스 디스플레이 모드 (수신 전용) -->
+    <div id="display">
+      <div id="displayConnect">
+        <div class="title">디스플레이 모드</div>
+        <div class="chanInfo">채널: <span class="chan"></span></div>
+        <button id="btnConnect" class="bigBtn focusable">연결 시작</button>
+        <div id="displayMsg">연결을 눌러 신호를 기다립니다</div>
+      </div>
+    </div>
+
+    <!-- 폰 리모컨 모드 (송신) -->
+    <div id="remote">
+      <div class="remoteHeader">
+        <span>리모컨 <span class="chanInfo">채널: <span class="chan"></span></span></span>
+        <button id="remoteBack" class="focusable">← 뒤로</button>
+      </div>
+      <div id="remoteGrid"></div>
+      <div id="remoteStatus">버튼을 눌러 글래스로 전송</div>
+      <button id="btnClear" class="focusable">대기(지우기) 전송</button>
     </div>
 
     <!-- 도슨트 화면 -->
@@ -274,6 +379,22 @@
     const simSlidersEl= document.getElementById('simSliders');
     const ttsToggle   = document.getElementById('ttsToggle');
     const bleStatus   = document.getElementById('bleStatus');
+    // 신규: 디스플레이/리모컨 모드
+    const btnDisplay  = document.getElementById('btnDisplay');
+    const btnRemote   = document.getElementById('btnRemote');
+    const displayEl   = document.getElementById('display');
+    const displayConnect = document.getElementById('displayConnect');
+    const displayMsg  = document.getElementById('displayMsg');
+    const btnConnect  = document.getElementById('btnConnect');
+    const remoteEl    = document.getElementById('remote');
+    const remoteGrid  = document.getElementById('remoteGrid');
+    const remoteStatus= document.getElementById('remoteStatus');
+    const remoteBack  = document.getElementById('remoteBack');
+    const btnClear    = document.getElementById('btnClear');
+
+    // 폰↔글래스 공유 채널 (ntfy.sh). ?ch= 로 덮어쓰기 가능
+    const CHANNEL = new URLSearchParams(location.search).get('ch') || 'metadisplay-limjy-7f3a2k';
+    document.querySelectorAll('.chan').forEach(el => { el.textContent = CHANNEL; });
 
     /* ─────────────────────────────────────────────
        3. 상태
@@ -650,6 +771,103 @@
     });
 
     /* ─────────────────────────────────────────────
+       8-A. 글래스 디스플레이 모드 (ntfy 구독, 수신 전용)
+       ───────────────────────────────────────────── */
+    let ws = null;
+    let wsReconnect = null;
+
+    function startDisplay() {
+      waitingEl.style.display = 'none';
+      displayEl.style.display = 'block';
+      setTimeout(() => { try { btnConnect.focus(); } catch (e) {} }, 0); // D-pad 포커스
+    }
+
+    function connectDisplay() {
+      // TTS/오디오 베스트에포트 워밍업 (사용자 제스처 안)
+      try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
+      if ('speechSynthesis' in window) window.speechSynthesis.getVoices();
+      btnConnect.style.display = 'none';
+      displayMsg.textContent = '채널 연결 중…';
+      openWS();
+    }
+
+    function openWS() {
+      try {
+        ws = new WebSocket('wss://ntfy.sh/' + encodeURIComponent(CHANNEL) + '/ws?since=10m');
+      } catch (e) { scheduleReconnect(); return; }
+
+      ws.addEventListener('open', () => {
+        displayMsg.textContent = '연결됨 — 신호 대기 중…';
+      });
+      ws.addEventListener('message', (ev) => {
+        let data;
+        try { data = JSON.parse(ev.data); } catch (e) { return; }
+        if (data.event !== 'message') return;           // open/keepalive 무시
+        const id = (data.message || '').trim();
+        if (id === 'off') { displayIdle(); return; }
+        if (!beaconById[id]) return;
+        // 도슨트 화면으로 전환 후 기존 로직 재사용
+        displayConnect.style.display = 'none';
+        docentEl.style.display = 'block';
+        enterBeacon(id);
+      });
+      ws.addEventListener('close', scheduleReconnect);
+      ws.addEventListener('error', () => { try { ws.close(); } catch (e) {} });
+    }
+
+    function scheduleReconnect() {
+      if (wsReconnect) return;
+      wsReconnect = setTimeout(() => { wsReconnect = null; openWS(); }, 2000);
+    }
+
+    // "대기(지우기)" 수신 시 화면 비우고 대기 표시
+    function displayIdle() {
+      cancelAnimationFrame(rafId);
+      if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+      currentBeaconId = null;
+      docentEl.style.display = 'none';
+      displayConnect.style.display = 'flex';
+      displayMsg.textContent = '연결됨 — 신호 대기 중…';
+    }
+
+    /* ─────────────────────────────────────────────
+       8-B. 폰 리모컨 모드 (ntfy 발행, 송신)
+       ───────────────────────────────────────────── */
+    function startRemote() {
+      waitingEl.style.display = 'none';
+      remoteEl.style.display = 'flex';
+    }
+
+    function buildRemoteGrid() {
+      beacons.forEach(b => {
+        const btn = document.createElement('button');
+        btn.className = 'remoteBtn focusable';
+        btn.textContent = b.id;
+        btn.addEventListener('click', () => sendBeacon(b.id, btn));
+        remoteGrid.appendChild(btn);
+      });
+    }
+
+    async function sendBeacon(id, btn) {
+      remoteGrid.querySelectorAll('.remoteBtn').forEach(x => x.classList.remove('sent'));
+      if (btn) btn.classList.add('sent');
+      remoteStatus.textContent = '전송 중… ' + id;
+      try {
+        await fetch('https://ntfy.sh/' + encodeURIComponent(CHANNEL), { method: 'POST', body: id });
+        remoteStatus.textContent = (id === 'off') ? '대기 신호 전송됨' : ('전송됨 → ' + id + '번 BLE');
+      } catch (e) {
+        remoteStatus.textContent = '전송 실패: ' + e.message;
+      }
+    }
+
+    function remoteToWaiting() {
+      remoteEl.style.display = 'none';
+      waitingEl.style.display = 'flex';
+    }
+
+    buildRemoteGrid();
+
+    /* ─────────────────────────────────────────────
        9. 테스트 모드: 키보드 1~8
        ───────────────────────────────────────────── */
     window.addEventListener('keydown', (e) => {
@@ -669,6 +887,11 @@
     /* ─────────────────────────────────────────────
        10. 시작 — 메인 화면 두 버튼
        ───────────────────────────────────────────── */
+    btnDisplay.addEventListener('click', startDisplay);
+    btnConnect.addEventListener('click', connectDisplay);
+    btnRemote.addEventListener('click', startRemote);
+    remoteBack.addEventListener('click', remoteToWaiting);
+    btnClear.addEventListener('click', () => sendBeacon('off', null));
     btnDocent.addEventListener('click', startDocent);
     btnScanner.addEventListener('click', startScanner);
     scanBackBtn.addEventListener('click', backToWaiting);
