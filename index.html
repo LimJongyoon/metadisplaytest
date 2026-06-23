@@ -185,6 +185,56 @@
       outline-offset: 2px;
     }
 
+    /* 임의 기기 이름 표시 (디스플레이 수신) */
+    #nameView {
+      position: absolute;
+      inset: var(--safe);
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 18px;
+      text-align: center;
+    }
+    #nameView.show { display: flex; }
+    #nameView .nvSub { font-size: 24px; color: #aaa; }
+    #nameView .nvName { font-size: 52px; font-weight: 800; line-height: 1.2; word-break: break-word; }
+
+    /* ⑤ 자동 송신 화면 (#remote 스타일 상당수 재사용) */
+    #autosend {
+      position: absolute;
+      inset: 0;
+      display: none;
+      flex-direction: column;
+      padding: 24px;
+      color: #fff;
+    }
+    #autosend .remoteHeader {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 20px;
+      font-weight: 800;
+      margin-bottom: 12px;
+    }
+    #autoBack {
+      font-size: 14px; color: #fff; background: #1a1a1a;
+      border: 1px solid #666; border-radius: 8px; padding: 6px 10px; cursor: pointer;
+    }
+    #autoCurrent {
+      background: #141414; border: 1px solid #2a2a2a; border-radius: 12px;
+      padding: 14px; margin-bottom: 14px;
+    }
+    #autoCurrent .acLabel { font-size: 13px; color: #888; }
+    #autoCurrent .acName { font-size: 30px; font-weight: 800; margin: 4px 0 10px; word-break: break-word; }
+    #autoCurrent .acMeta { display: flex; align-items: center; gap: 8px; }
+    #autoCurrent .bar { flex: 1; height: 10px; background: #222; border-radius: 5px; overflow: hidden; }
+    #autoCurrent .fill { display: block; height: 100%; background: #3ad36a; }
+    #autoCurrent .acVal { width: 56px; text-align: right; font-size: 14px; color: #9a9a9a; }
+    .acListTitle { font-size: 13px; color: #888; margin-bottom: 6px; }
+    #autoList { flex: 1; overflow-y: auto; }
+    #autoList .empty { color: #777; font-size: 15px; padding-top: 12px; text-align: center; }
+
     /* ── 도슨트 화면 ── */
     #docent {
       position: absolute;
@@ -281,6 +331,7 @@
       <button id="btnRemote" class="bigBtn focusable">② 폰 리모컨 모드</button>
       <button id="btnDocent" class="bigBtn focusable">③ 단독 도슨트 테스트</button>
       <button id="btnScanner" class="bigBtn focusable">④ 주변 BLE 스캔</button>
+      <button id="btnAutoSend" class="bigBtn focusable">⑤ 폰 BLE 자동 송신 (최강 신호)</button>
       <div id="waitingMsg">모드를 선택하세요</div>
     </div>
 
@@ -291,6 +342,11 @@
         <div class="chanInfo">채널: <span class="chan"></span></div>
         <button id="btnConnect" class="bigBtn focusable">연결 시작</button>
         <div id="displayMsg">연결을 눌러 신호를 기다립니다</div>
+      </div>
+      <!-- 임의 기기 이름 표시 (⑤ 자동 송신 수신용) -->
+      <div id="nameView">
+        <div class="nvSub">가장 강한 신호</div>
+        <div class="nvName"></div>
       </div>
     </div>
 
@@ -303,6 +359,21 @@
       <div id="remoteGrid"></div>
       <div id="remoteStatus">버튼을 눌러 글래스로 전송</div>
       <button id="btnClear" class="focusable">대기(지우기) 전송</button>
+    </div>
+
+    <!-- ⑤ 폰 BLE 자동 송신 모드 -->
+    <div id="autosend">
+      <div class="remoteHeader">
+        <span>자동 송신 <span class="chanInfo">채널: <span class="chan"></span></span></span>
+        <button id="autoBack" class="focusable">← 뒤로</button>
+      </div>
+      <div id="autoCurrent">
+        <div class="acLabel">전송 중인 최강 기기</div>
+        <div class="acName">—</div>
+        <div class="acMeta"><span class="bar"><span class="fill" style="width:0%"></span></span><span class="acVal">—</span></div>
+      </div>
+      <div class="acListTitle">주변 기기 (신호순)</div>
+      <div id="autoList"><div class="empty">스캔 준비 중…</div></div>
     </div>
 
     <!-- 도슨트 화면 -->
@@ -391,6 +462,16 @@
     const remoteStatus= document.getElementById('remoteStatus');
     const remoteBack  = document.getElementById('remoteBack');
     const btnClear    = document.getElementById('btnClear');
+    // 신규: ⑤ 자동 송신 + 디스플레이 이름 표시
+    const btnAutoSend = document.getElementById('btnAutoSend');
+    const autosendEl  = document.getElementById('autosend');
+    const autoBack    = document.getElementById('autoBack');
+    const autoListEl  = document.getElementById('autoList');
+    const acNameEl    = document.querySelector('#autoCurrent .acName');
+    const acFillEl    = document.querySelector('#autoCurrent .fill');
+    const acValEl     = document.querySelector('#autoCurrent .acVal');
+    const nameViewEl  = document.getElementById('nameView');
+    const nvNameEl    = document.querySelector('#nameView .nvName');
 
     // 폰↔글래스 공유 채널 (ntfy.sh). ?ch= 로 덮어쓰기 가능
     const CHANNEL = new URLSearchParams(location.search).get('ch') || 'metadisplay-limjy-7f3a2k';
@@ -803,13 +884,19 @@
         let data;
         try { data = JSON.parse(ev.data); } catch (e) { return; }
         if (data.event !== 'message') return;           // open/keepalive 무시
-        const id = (data.message || '').trim();
-        if (id === 'off') { displayIdle(); return; }
-        if (!beaconById[id]) return;
-        // 도슨트 화면으로 전환 후 기존 로직 재사용
-        displayConnect.style.display = 'none';
-        docentEl.style.display = 'block';
-        enterBeacon(id);
+        const msg = (data.message || '').trim();
+        if (!msg) return;
+        if (msg === 'off') { displayIdle(); return; }
+        if (beaconById[msg]) {
+          // 비콘 id(01~08) → 도슨트 스크립트
+          displayConnect.style.display = 'none';
+          nameViewEl.classList.remove('show');
+          docentEl.style.display = 'block';
+          enterBeacon(msg);
+        } else {
+          // 임의 기기 이름 → 크게 표시
+          showName(msg);
+        }
       });
       ws.addEventListener('close', scheduleReconnect);
       ws.addEventListener('error', () => { try { ws.close(); } catch (e) {} });
@@ -826,8 +913,19 @@
       if ('speechSynthesis' in window) window.speechSynthesis.cancel();
       currentBeaconId = null;
       docentEl.style.display = 'none';
+      nameViewEl.classList.remove('show');
       displayConnect.style.display = 'flex';
       displayMsg.textContent = '연결됨 — 신호 대기 중…';
+    }
+
+    // ⑤에서 보낸 임의 기기 이름을 크게 표시
+    function showName(name) {
+      cancelAnimationFrame(rafId);
+      currentBeaconId = null;
+      displayConnect.style.display = 'none';
+      docentEl.style.display = 'none';
+      nvNameEl.textContent = name;
+      nameViewEl.classList.add('show');
     }
 
     /* ─────────────────────────────────────────────
@@ -868,6 +966,90 @@
     buildRemoteGrid();
 
     /* ─────────────────────────────────────────────
+       8-C. 모드 ⑤ 폰 BLE 자동 송신 (최강 신호 기기 → 글래스)
+       ───────────────────────────────────────────── */
+    let autoSendTimer = null;
+    let autoLastSent = null;      // 직전에 보낸 라벨 (중복 전송 방지)
+
+    function deviceLabel(d) {
+      return d.name || (d.manuf ? d.manuf + ' 기기' : '');
+    }
+
+    async function startAutoSend() {
+      waitingEl.style.display = 'none';
+      autosendEl.style.display = 'flex';
+      autoLastSent = null;
+
+      if (!bleSupported()) {
+        autoListEl.innerHTML = '<div class="empty">이 기기는 BLE 스캔을 지원하지 않습니다.<br>폰(안드로이드 크롬)에서 블루투스를 켜고 chrome://flags의 Experimental Web Platform features를 활성화하세요.</div>';
+        return;
+      }
+      try {
+        await startLEScan(onScanAdvertisement);   // ④와 동일 수집부 재사용
+        autoListEl.innerHTML = '<div class="empty">주변 기기를 찾는 중…</div>';
+        autoSendTimer = setInterval(autoSendTick, 800);
+      } catch (e) {
+        autoListEl.innerHTML = '<div class="empty">스캔 실패: ' + escapeHtml(e.message) + '<br>(블루투스가 켜져 있고 권한이 허용됐는지 확인)</div>';
+      }
+    }
+
+    function autoSendTick() {
+      const now = performance.now();
+      for (const id of Object.keys(scanDevices)) {
+        if (now - scanDevices[id].lastSeen > SCAN_STALE_MS) delete scanDevices[id];
+      }
+      // 이름/제조사가 식별되는 기기만, 신호순 정렬
+      const list = Object.values(scanDevices).filter(d => d.name || d.manuf);
+      list.sort((a, b) => b.rssi - a.rssi);
+
+      const best = list[0];
+      // 상단 "전송 중" 카드 갱신
+      if (best) {
+        const label = deviceLabel(best);
+        acNameEl.textContent = label;
+        acFillEl.style.width = rssiToProximity(best.rssi) + '%';
+        acValEl.textContent = best.rssi + 'dBm';
+        // 라벨이 바뀌었을 때만 전송 (스팸 방지)
+        if (label && label !== autoLastSent) {
+          autoLastSent = label;
+          fetch('https://ntfy.sh/' + encodeURIComponent(CHANNEL), { method: 'POST', body: label })
+            .catch(() => {});
+        }
+      } else {
+        acNameEl.textContent = '—';
+        acFillEl.style.width = '0%';
+        acValEl.textContent = '—';
+      }
+
+      // 후보 목록 (④ 스캐너 행 스타일 재사용)
+      if (list.length === 0) {
+        autoListEl.innerHTML = '<div class="empty">식별되는 기기가 아직 없습니다…</div>';
+        return;
+      }
+      autoListEl.innerHTML = list.map((d, i) => {
+        const label = deviceLabel(d);
+        const sub = (d.name && d.manuf) ? d.manuf : '';
+        const pct = rssiToProximity(d.rssi);
+        const mark = i === 0 ? ' ●' : '';
+        return '<div class="scanItem">'
+          + '<div class="info"><div class="nm">' + escapeHtml(label) + mark + '</div>'
+          + (sub ? '<div class="mf">' + escapeHtml(sub) + '</div>' : '')
+          + '</div>'
+          + '<span class="bar"><span class="fill" style="width:' + pct + '%"></span></span>'
+          + '<span class="val">' + d.rssi + 'dBm</span>'
+          + '</div>';
+      }).join('');
+    }
+
+    function autoSendToWaiting() {
+      stopLEScan();
+      if (autoSendTimer) { clearInterval(autoSendTimer); autoSendTimer = null; }
+      for (const id of Object.keys(scanDevices)) delete scanDevices[id];
+      autosendEl.style.display = 'none';
+      waitingEl.style.display = 'flex';
+    }
+
+    /* ─────────────────────────────────────────────
        9. 테스트 모드: 키보드 1~8
        ───────────────────────────────────────────── */
     window.addEventListener('keydown', (e) => {
@@ -896,6 +1078,8 @@
     btnScanner.addEventListener('click', startScanner);
     scanBackBtn.addEventListener('click', backToWaiting);
     showAllChk.addEventListener('change', renderScan);
+    btnAutoSend.addEventListener('click', startAutoSend);
+    autoBack.addEventListener('click', autoSendToWaiting);
   </script>
 </body>
 </html>
