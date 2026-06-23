@@ -50,18 +50,58 @@
       padding: var(--safe);
       text-align: center;
     }
-    #startBtn {
-      font-size: 32px;
+    .bigBtn {
+      font-size: 28px;
       font-weight: 700;
       color: #ffffff;
       background: #1a1a1a;
       border: 2px solid #ffffff;
       border-radius: 16px;
-      padding: 28px 40px;
+      padding: 24px 32px;
+      cursor: pointer;
+      width: 100%;
+      max-width: 440px;
+    }
+    .bigBtn:active { background: #333333; }
+    #waitingMsg { font-size: 20px; color: #aaaaaa; }
+    #waiting .title { font-size: 26px; font-weight: 800; margin-bottom: 8px; }
+
+    /* ── 주변 BLE 스캔 화면 ── */
+    #scanner {
+      position: absolute;
+      inset: 0;
+      display: none;
+      flex-direction: column;
+      padding: 24px;
+      color: #fff;
+    }
+    #scanner .scanHeader {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 22px;
+      font-weight: 800;
+      margin-bottom: 6px;
+    }
+    #scanBack {
+      font-size: 14px;
+      color: #fff;
+      background: #1a1a1a;
+      border: 1px solid #666;
+      border-radius: 8px;
+      padding: 6px 10px;
       cursor: pointer;
     }
-    #startBtn:active { background: #333333; }
-    #waitingMsg { font-size: 22px; color: #aaaaaa; }
+    #scanner .scanOpt { font-size: 14px; color: #bbb; display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+    #scanList { flex: 1; overflow-y: auto; }
+    .scanItem { display: flex; align-items: center; gap: 8px; padding: 7px 0; border-bottom: 1px solid #1c1c1c; }
+    .scanItem .info { flex: 1; min-width: 0; }
+    .scanItem .nm { font-size: 18px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .scanItem .mf { font-size: 12px; color: #8fb6ff; }
+    .scanItem .bar { width: 90px; height: 9px; background: #222; border-radius: 5px; overflow: hidden; flex: none; }
+    .scanItem .fill { display: block; height: 100%; background: #3ad36a; }
+    .scanItem .val { width: 56px; text-align: right; font-size: 14px; color: #9a9a9a; flex: none; }
+    #scanList .empty { color: #777; font-size: 16px; padding-top: 16px; text-align: center; }
 
     /* ── 도슨트 화면 ── */
     #docent {
@@ -154,8 +194,10 @@
   <div id="stage">
     <!-- 대기 화면 -->
     <div id="waiting">
-      <button id="startBtn">BLE 스캔 시작</button>
-      <div id="waitingMsg">버튼을 눌러 도슨트를 시작하세요</div>
+      <div class="title">메타 디스플레이 테스트</div>
+      <button id="btnDocent" class="bigBtn">① 도슨트 스크립트 테스트</button>
+      <button id="btnScanner" class="bigBtn">② 주변 BLE 스캔</button>
+      <div id="waitingMsg">모드를 선택하세요</div>
     </div>
 
     <!-- 도슨트 화면 -->
@@ -163,6 +205,16 @@
       <div id="viewport">
         <div id="scroller"></div>
       </div>
+    </div>
+
+    <!-- 주변 BLE 스캔 화면 -->
+    <div id="scanner">
+      <div class="scanHeader">
+        <span>주변 BLE 기기 <span id="scanCount"></span></span>
+        <button id="scanBack">← 뒤로</button>
+      </div>
+      <label class="scanOpt"><input type="checkbox" id="showAll" /> 이름·제조사 없는 기기도 표시</label>
+      <div id="scanList"><div class="empty">스캔 준비 중…</div></div>
     </div>
   </div>
 
@@ -206,10 +258,16 @@
        ───────────────────────────────────────────── */
     const waitingEl   = document.getElementById('waiting');
     const waitingMsg  = document.getElementById('waitingMsg');
-    const startBtn    = document.getElementById('startBtn');
+    const btnDocent   = document.getElementById('btnDocent');
+    const btnScanner  = document.getElementById('btnScanner');
     const docentEl    = document.getElementById('docent');
     const scrollerEl  = document.getElementById('scroller');
     const viewportEl  = document.getElementById('viewport');
+    const scannerEl   = document.getElementById('scanner');
+    const scanListEl  = document.getElementById('scanList');
+    const scanCountEl = document.getElementById('scanCount');
+    const scanBackBtn = document.getElementById('scanBack');
+    const showAllChk  = document.getElementById('showAll');
     const debugToggle = document.getElementById('debugToggle');
     const debugPanel  = document.getElementById('debugPanel');
     const deviceListEl= document.getElementById('deviceList');
@@ -357,12 +415,38 @@
     }
 
     /* ─────────────────────────────────────────────
-       7. BLE 스캔 (requestLEScan)
+       7. BLE 스캔 공통 (requestLEScan)
        ───────────────────────────────────────────── */
-    async function startScan() {
-      waitingMsg.textContent = '스캔 중...';
-      startBtn.style.display = 'none';
-      // 도슨트 화면으로 전환 (대기 텍스트는 비콘 잡히면 가려짐)
+    // 현재 붙어 있는 advertisement 핸들러 (모드 전환 시 교체)
+    let advHandler = null;
+    let evalStarted = false;
+
+    function bleSupported() {
+      return !!(navigator.bluetooth && navigator.bluetooth.requestLEScan);
+    }
+
+    // 스캔 시작 + 지정 핸들러 부착. 성공 시 true.
+    async function startLEScan(handler) {
+      stopLEScan();
+      scanInstance = await navigator.bluetooth.requestLEScan({ acceptAllAdvertisements: true });
+      advHandler = handler;
+      navigator.bluetooth.addEventListener('advertisementreceived', advHandler);
+      return true;
+    }
+
+    function stopLEScan() {
+      if (advHandler) {
+        navigator.bluetooth.removeEventListener('advertisementreceived', advHandler);
+        advHandler = null;
+      }
+      if (scanInstance) { try { scanInstance.stop(); } catch (e) {} scanInstance = null; }
+    }
+
+    /* ─────────────────────────────────────────────
+       7-A. 모드 ① 도슨트 스크립트 테스트
+       ───────────────────────────────────────────── */
+    async function startDocent() {
+      waitingEl.style.display = 'none';
       docentEl.style.display = 'block';
       scanning = true;
 
@@ -372,35 +456,119 @@
 
       // 후보 평가 루프는 BLE 지원 여부와 무관하게 항상 동작
       // (시뮬레이터 슬라이더만으로도 근접 판정이 굴러가도록)
-      setInterval(evaluateCandidates, 500);
+      if (!evalStarted) { setInterval(evaluateCandidates, 500); evalStarted = true; }
 
-      if (!navigator.bluetooth || !navigator.bluetooth.requestLEScan) {
+      if (!bleSupported()) {
         bleStatus.textContent = 'BLE: requestLEScan 미지원 (시뮬레이터 사용)';
-        waitingMsg.textContent = 'BLE 미지원 — 시뮬레이터/키보드 1~8로 테스트';
         debugPanel.classList.add('show'); // 슬라이더가 바로 보이도록 패널 펼침
         return;
       }
-
       try {
-        scanInstance = await navigator.bluetooth.requestLEScan({
-          acceptAllAdvertisements: true,
-        });
+        await startLEScan(onDocentAdvertisement);
         bleStatus.textContent = 'BLE: 스캔 중';
-
-        navigator.bluetooth.addEventListener('advertisementreceived', onAdvertisement);
       } catch (e) {
         bleStatus.textContent = 'BLE 오류: ' + e.message;
-        waitingMsg.textContent = 'BLE 스캔 실패 — 키보드 1~8로 테스트';
+        debugPanel.classList.add('show');
       }
     }
 
-    function onAdvertisement(event) {
+    function onDocentAdvertisement(event) {
       const name = event.device && event.device.name;
       if (!name) return;
       const id = name.trim();
       if (!beaconById[id]) return;     // 01~08 만 관심
       seen[id] = { rssi: event.rssi, lastSeen: performance.now() };
       updateDebug();
+    }
+
+    /* ─────────────────────────────────────────────
+       7-B. 모드 ② 주변 BLE 스캔
+       ───────────────────────────────────────────── */
+    // 알려진 제조사 Company ID (Bluetooth SIG)
+    const COMPANY = {
+      0x004C: 'Apple', 0x0075: 'Samsung', 0x0006: 'Microsoft', 0x00E0: 'Google',
+      0x0087: 'Garmin', 0x0157: 'Huawei', 0x038F: 'Xiaomi', 0x01D7: 'Fitbit',
+      0x000F: 'Broadcom', 0x0059: 'Nordic', 0x004F: 'Logitech', 0x00D2: 'Sony',
+      0x0499: 'Ruuvi', 0x0118: 'Tile',
+    };
+    const scanDevices = {};       // device.id -> { name, manuf, rssi, lastSeen }
+    const SCAN_STALE_MS = 12000;  // 이 시간 이상 안 보이면 목록에서 제거
+    let scanRenderTimer = null;
+
+    async function startScanner() {
+      waitingEl.style.display = 'none';
+      scannerEl.style.display = 'flex';
+
+      if (!bleSupported()) {
+        scanListEl.innerHTML = '<div class="empty">이 브라우저는 requestLEScan을 지원하지 않습니다.<br>chrome://flags에서 Experimental Web Platform features를 켜주세요.</div>';
+        return;
+      }
+      try {
+        await startLEScan(onScanAdvertisement);
+        scanListEl.innerHTML = '<div class="empty">주변 기기를 찾는 중…</div>';
+        scanRenderTimer = setInterval(renderScan, 600);
+      } catch (e) {
+        scanListEl.innerHTML = '<div class="empty">스캔 실패: ' + e.message + '</div>';
+      }
+    }
+
+    function onScanAdvertisement(event) {
+      const d = event.device;
+      const id = d.id || (d.name || Math.random().toString());
+      let manuf = '';
+      if (event.manufacturerData) {
+        for (const key of event.manufacturerData.keys()) {
+          manuf = COMPANY[key] || ('제조사 0x' + key.toString(16).padStart(4, '0'));
+          break; // 첫 번째 회사 ID만 사용
+        }
+      }
+      scanDevices[id] = {
+        name: (d.name || event.name || '').trim(),
+        manuf,
+        rssi: event.rssi,
+        lastSeen: performance.now(),
+      };
+    }
+
+    function renderScan() {
+      const now = performance.now();
+      for (const id of Object.keys(scanDevices)) {
+        if (now - scanDevices[id].lastSeen > SCAN_STALE_MS) delete scanDevices[id];
+      }
+      let list = Object.values(scanDevices);
+      // 기본: 이름이나 제조사가 식별되는 실제 기기만 (익명 쓰레기값 제외)
+      if (!showAllChk.checked) list = list.filter(d => d.name || d.manuf);
+      list.sort((a, b) => b.rssi - a.rssi); // 가까운 순
+
+      scanCountEl.textContent = `(${list.length})`;
+      if (list.length === 0) {
+        scanListEl.innerHTML = '<div class="empty">식별되는 기기가 아직 없습니다…<br>(맥북/워치 등은 이름 대신 제조사로 표시될 수 있어요)</div>';
+        return;
+      }
+      scanListEl.innerHTML = list.map(d => {
+        const label = d.name || (d.manuf ? d.manuf + ' 기기' : '(이름 없음)');
+        const sub = (d.name && d.manuf) ? d.manuf : '';
+        const pct = rssiToProximity(d.rssi);
+        return '<div class="scanItem">'
+          + '<div class="info"><div class="nm">' + escapeHtml(label) + '</div>'
+          + (sub ? '<div class="mf">' + escapeHtml(sub) + '</div>' : '')
+          + '</div>'
+          + '<span class="bar"><span class="fill" style="width:' + pct + '%"></span></span>'
+          + '<span class="val">' + d.rssi + 'dBm</span>'
+          + '</div>';
+      }).join('');
+    }
+
+    function escapeHtml(s) {
+      return s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    }
+
+    function backToWaiting() {
+      stopLEScan();
+      if (scanRenderTimer) { clearInterval(scanRenderTimer); scanRenderTimer = null; }
+      for (const id of Object.keys(scanDevices)) delete scanDevices[id];
+      scannerEl.style.display = 'none';
+      waitingEl.style.display = 'flex';
     }
 
     function evaluateCandidates() {
@@ -490,16 +658,21 @@
         // 시뮬레이션: 해당 비콘을 최강으로 만들고 즉시 진입
         simRssi[id] = -40;
         if (simInputs[id]) simInputs[id].value = -40;
-        // 도슨트 화면이 아직 숨겨져 있으면 표시
+        // 스캔 화면이면 도슨트 모드로 전환
+        if (scannerEl.style.display !== 'none' && scannerEl.style.display !== '') backToWaiting();
+        waitingEl.style.display = 'none';
         docentEl.style.display = 'block';
         enterBeacon(id);
       }
     });
 
     /* ─────────────────────────────────────────────
-       10. 시작
+       10. 시작 — 메인 화면 두 버튼
        ───────────────────────────────────────────── */
-    startBtn.addEventListener('click', startScan);
+    btnDocent.addEventListener('click', startDocent);
+    btnScanner.addEventListener('click', startScanner);
+    scanBackBtn.addEventListener('click', backToWaiting);
+    showAllChk.addEventListener('change', renderScan);
   </script>
 </body>
 </html>
