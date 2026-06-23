@@ -117,8 +117,8 @@
       top: 36px;
       right: 6px;
       z-index: 10;
-      width: 200px;
-      max-height: 60vh;
+      width: 240px;
+      max-height: 80vh;
       overflow-y: auto;
       display: none;
       font-size: 12px;
@@ -130,9 +130,21 @@
       padding: 8px;
     }
     #debugPanel.show { display: block; }
-    #debugPanel h4 { font-size: 12px; color: #fff; margin-bottom: 4px; }
-    #debugPanel .row { display: flex; justify-content: space-between; }
-    #debugPanel .row.current { color: #ffd24d; font-weight: 700; }
+    #debugPanel h4 { font-size: 12px; color: #fff; margin: 6px 0 4px; }
+    #debugPanel .row { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
+    #debugPanel .bid { width: 38px; color: #cfcfcf; }
+    #debugPanel .bar { flex: 1; height: 9px; background: #222; border-radius: 5px; overflow: hidden; }
+    #debugPanel .fill { display: block; height: 100%; width: 0; background: #3ad36a; transition: width 0.2s; }
+    #debugPanel .val { width: 50px; text-align: right; color: #9a9a9a; }
+    #debugPanel .row.current .bid { color: #ffd24d; font-weight: 700; }
+    #debugPanel .row.current .fill { background: #ffd24d; }
+    #debugPanel .row.candidate .bid { color: #7fd0ff; }
+    #debugPanel .row.candidate .fill { background: #7fd0ff; }
+    #debugPanel .sim { margin-top: 8px; border-top: 1px solid #2a2a2a; padding-top: 6px; }
+    #debugPanel .hint2 { color: #777; font-weight: 400; }
+    #debugPanel .simrow { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
+    #debugPanel .simrow .sl { width: 38px; color: #cfcfcf; }
+    #debugPanel .simrow input[type=range] { flex: 1; }
     #debugPanel .opts { margin-top: 8px; border-top: 1px solid #2a2a2a; padding-top: 6px; color: #ccc; }
     #debugPanel label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
     #debugPanel .hint { color: #777; margin-top: 6px; }
@@ -157,11 +169,16 @@
   <!-- 디버그 -->
   <button id="debugToggle">디버그 ▾</button>
   <div id="debugPanel">
-    <h4>감지된 디바이스</h4>
+    <h4>신호 / 근접도</h4>
     <div id="deviceList">—</div>
+    <div class="sim">
+      <h4>근접 시뮬레이터 <span class="hint2">(BLE 없을 때)</span></h4>
+      <div id="simSliders"></div>
+    </div>
     <div class="opts">
       <label><input type="checkbox" id="ttsToggle" checked /> TTS 켜기</label>
-      <div class="hint">키보드 1~8: 비콘 진입 시뮬레이션</div>
+      <div class="hint">슬라이더를 올리면 그 비콘이 가까워집니다</div>
+      <div class="hint">키보드 1~8: 해당 비콘 즉시 진입</div>
       <div class="hint" id="bleStatus">BLE: 대기 중</div>
     </div>
   </div>
@@ -196,6 +213,7 @@
     const debugToggle = document.getElementById('debugToggle');
     const debugPanel  = document.getElementById('debugPanel');
     const deviceListEl= document.getElementById('deviceList');
+    const simSlidersEl= document.getElementById('simSliders');
     const ttsToggle   = document.getElementById('ttsToggle');
     const bleStatus   = document.getElementById('bleStatus');
 
@@ -208,13 +226,40 @@
     let rafId = null;             // 스크롤 애니메이션
     const SCROLL_SPEED = 40;      // px/초 (텔레프롬프터 속도)
 
-    // RSSI 집계: { "01": { rssi, lastSeen }, ... }
+    // 실제 BLE RSSI 집계: { "01": { rssi, lastSeen }, ... }
     const seen = {};
     const STALE_MS = 4000;        // 이 시간 이상 안 보이면 후보에서 제외
     const CONFIRM_MS = 2500;      // 최강 신호가 이만큼 유지돼야 "현재 위치" 확정
 
     let candidateId = null;       // 현재 최강 후보
     let candidateSince = 0;       // 후보가 된 시각
+
+    // 근접 시뮬레이터: 슬라이더로 만든 가짜 RSSI { "01": -55, ... }
+    const simRssi = {};
+    const simInputs = {};         // id -> <input range>
+    const SIM_OFF = -100;         // 이 값이면 신호 없음(꺼짐)으로 취급
+
+    // RSSI(dBm)를 0~100% 근접도로 변환 (-40=매우 가까움, -95=멈)
+    function rssiToProximity(rssi) {
+      const NEAR = -40, FAR = -95;
+      const pct = ((rssi - FAR) / (NEAR - FAR)) * 100;
+      return Math.max(0, Math.min(100, Math.round(pct)));
+    }
+
+    // 실제 BLE + 시뮬레이터를 합친 현재 신호 맵 { id: rssi }
+    function getSignals() {
+      const now = performance.now();
+      const out = {};
+      for (const id of Object.keys(seen)) {
+        if (now - seen[id].lastSeen <= STALE_MS) out[id] = seen[id].rssi;
+      }
+      for (const id of Object.keys(simRssi)) {
+        if (simRssi[id] > SIM_OFF) {
+          out[id] = (id in out) ? Math.max(out[id], simRssi[id]) : simRssi[id];
+        }
+      }
+      return out;
+    }
 
     /* ─────────────────────────────────────────────
        4. 콘텐츠 렌더링 + 스크롤
@@ -325,9 +370,14 @@
       try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
       if ('speechSynthesis' in window) window.speechSynthesis.getVoices();
 
+      // 후보 평가 루프는 BLE 지원 여부와 무관하게 항상 동작
+      // (시뮬레이터 슬라이더만으로도 근접 판정이 굴러가도록)
+      setInterval(evaluateCandidates, 500);
+
       if (!navigator.bluetooth || !navigator.bluetooth.requestLEScan) {
-        bleStatus.textContent = 'BLE: requestLEScan 미지원 (디버그 모드 사용)';
-        waitingMsg.textContent = 'BLE 미지원 — 키보드 1~8로 테스트';
+        bleStatus.textContent = 'BLE: requestLEScan 미지원 (시뮬레이터 사용)';
+        waitingMsg.textContent = 'BLE 미지원 — 시뮬레이터/키보드 1~8로 테스트';
+        debugPanel.classList.add('show'); // 슬라이더가 바로 보이도록 패널 펼침
         return;
       }
 
@@ -338,8 +388,6 @@
         bleStatus.textContent = 'BLE: 스캔 중';
 
         navigator.bluetooth.addEventListener('advertisementreceived', onAdvertisement);
-        // 주기적으로 후보 평가
-        setInterval(evaluateCandidates, 500);
       } catch (e) {
         bleStatus.textContent = 'BLE 오류: ' + e.message;
         waitingMsg.textContent = 'BLE 스캔 실패 — 키보드 1~8로 테스트';
@@ -357,16 +405,17 @@
 
     function evaluateCandidates() {
       const now = performance.now();
-      // 오래된 항목 제거
+      // 오래된 실제 BLE 항목 제거
       for (const id of Object.keys(seen)) {
         if (now - seen[id].lastSeen > STALE_MS) delete seen[id];
       }
-      // 최강 신호 후보 선택
+      // 실제 + 시뮬레이터 합친 신호 중 최강 후보 선택
+      const sig = getSignals();
       let best = null;
-      for (const id of Object.keys(seen)) {
-        if (!best || seen[id].rssi > seen[best].rssi) best = id;
+      for (const id of Object.keys(sig)) {
+        if (!best || sig[id] > sig[best]) best = id;
       }
-      if (!best) return;
+      if (!best) { candidateId = null; updateDebug(); return; }
 
       if (best !== candidateId) {
         candidateId = best;
@@ -382,16 +431,51 @@
        8. 디버그 패널
        ───────────────────────────────────────────── */
     function updateDebug() {
-      const ids = Object.keys(seen).sort();
-      if (ids.length === 0) {
-        deviceListEl.innerHTML = '<div class="row">— 감지된 디바이스 없음 —</div>';
-      } else {
-        deviceListEl.innerHTML = ids.map(id => {
-          const cls = id === currentBeaconId ? 'row current' : 'row';
-          return `<div class="${cls}"><span>${id}</span><span>${seen[id].rssi} dBm</span></div>`;
-        }).join('');
-      }
+      const sig = getSignals();
+      // 8개 비콘을 항상 막대로 표시 (신호 없으면 빈 막대)
+      deviceListEl.innerHTML = beacons.map(b => {
+        const id = b.id;
+        const has = id in sig;
+        const pct = has ? rssiToProximity(sig[id]) : 0;
+        let cls = 'row';
+        let mark = '';
+        if (id === currentBeaconId) { cls += ' current'; mark = ' ●'; }      // 확정(현재 표시 중)
+        else if (id === candidateId) { cls += ' candidate'; mark = ' ◌'; }   // 후보(곧 확정)
+        const val = has ? `${sig[id]}dBm` : '—';
+        return `<div class="${cls}">`
+          + `<span class="bid">${id}${mark}</span>`
+          + `<span class="bar"><span class="fill" style="width:${pct}%"></span></span>`
+          + `<span class="val">${val}</span>`
+          + `</div>`;
+      }).join('');
     }
+
+    // 시뮬레이터 슬라이더 8개 생성 (위로 올릴수록 그 비콘이 가까워짐)
+    function buildSimSliders() {
+      beacons.forEach(b => {
+        const row = document.createElement('div');
+        row.className = 'simrow';
+        const label = document.createElement('span');
+        label.className = 'sl';
+        label.textContent = b.id;
+        const input = document.createElement('input');
+        input.type = 'range';
+        input.min = SIM_OFF;     // 맨 왼쪽 = 꺼짐(신호 없음)
+        input.max = -40;         // 맨 오른쪽 = 매우 가까움
+        input.step = 1;
+        input.value = SIM_OFF;
+        input.addEventListener('input', () => {
+          simRssi[b.id] = Number(input.value);
+          updateDebug();
+        });
+        simInputs[b.id] = input;
+        row.appendChild(label);
+        row.appendChild(input);
+        simSlidersEl.appendChild(row);
+      });
+    }
+    buildSimSliders();
+    updateDebug();
 
     debugToggle.addEventListener('click', () => {
       debugPanel.classList.toggle('show');
@@ -403,8 +487,9 @@
     window.addEventListener('keydown', (e) => {
       if (e.key >= '1' && e.key <= '8') {
         const id = String(Number(e.key)).padStart(2, '0');
-        // 시뮬레이션: seen 갱신 + 즉시 진입
-        seen[id] = { rssi: -40, lastSeen: performance.now() };
+        // 시뮬레이션: 해당 비콘을 최강으로 만들고 즉시 진입
+        simRssi[id] = -40;
+        if (simInputs[id]) simInputs[id].value = -40;
         // 도슨트 화면이 아직 숨겨져 있으면 표시
         docentEl.style.display = 'block';
         enterBeacon(id);
